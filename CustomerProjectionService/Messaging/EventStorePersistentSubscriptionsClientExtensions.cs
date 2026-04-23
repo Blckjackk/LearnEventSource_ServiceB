@@ -9,7 +9,7 @@ public static class EventStorePersistentSubscriptionsClientExtensions
         string streamName,
         string groupName,
         Func<PersistentSubscription, ResolvedEvent, int?, CancellationToken, Task> eventAppeared,
-        Action<PersistentSubscription, SubscriptionDroppedReason, Exception>? subscriptionDropped = null,
+        Action<PersistentSubscription, SubscriptionDroppedReason, Exception?>? subscriptionDropped = null,
         UserCredentials? userCredentials = null,
         int bufferSize = 10,
         bool autoAck = false,

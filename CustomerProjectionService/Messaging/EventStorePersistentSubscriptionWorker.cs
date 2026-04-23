@@ -10,13 +10,13 @@ namespace CustomerProjectionService.Messaging;
 
 public class EventStorePersistentSubscriptionWorker : BackgroundService
 {
-    private readonly EventStorePersistentSubscriptionsClient _client;
+    private readonly EventStoreClient _client;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IConfiguration _configuration;
     private readonly ILogger<EventStorePersistentSubscriptionWorker> _logger;
 
     public EventStorePersistentSubscriptionWorker(
-        EventStorePersistentSubscriptionsClient client,
+        EventStoreClient client,
         IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
         ILogger<EventStorePersistentSubscriptionWorker> logger)
@@ -29,49 +29,59 @@ public class EventStorePersistentSubscriptionWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var streamName = _configuration["EventStore:Subscription:Stream"] ?? "CustomerStream";
-        var groupName = _configuration["EventStore:Subscription:Group"] ?? "service-b-sql-group";
+        _logger.LogInformation("EventStore projection worker starting (SubscribeToAll + idempotent DB writes)");
 
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                _logger.LogInformation("Connecting persistent subscription Stream={Stream} Group={Group}", streamName, groupName);
-
-                await _client.SubscribeAsync(
-                    streamName,
-                    groupName,
+                await _client.SubscribeToAllAsync(
+                    Position.Start,
                     EventAppeared,
-                    SubscriptionDropped,
+                    subscriptionDropped: SubscriptionDropped,
                     cancellationToken: stoppingToken);
 
                 await Task.Delay(Timeout.Infinite, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
+                _logger.LogInformation("EventStore projection worker stopping");
                 break;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Persistent subscription disconnected. Reconnecting in 5 seconds.");
+                _logger.LogError(ex, "Subscription disconnected/failed. Reconnecting in 5 seconds.");
                 await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
             }
         }
     }
 
-    private void SubscriptionDropped(PersistentSubscription subscription, SubscriptionDroppedReason reason, Exception? ex)
+    private void SubscriptionDropped(StreamSubscription subscription, SubscriptionDroppedReason reason, Exception? ex)
     {
-        _logger.LogWarning(ex, "Subscription dropped: {Reason}", reason);
+        _logger.LogWarning(ex, "SubscribeToAll dropped: {Reason}", reason);
     }
 
-    private async Task EventAppeared(PersistentSubscription subscription, ResolvedEvent evnt, int? retryCount, CancellationToken cancellationToken)
+    private async Task EventAppeared(StreamSubscription subscription, ResolvedEvent evnt, CancellationToken cancellationToken)
     {
         try
         {
+            if (evnt.Event.EventStreamId.StartsWith("$", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            if (!evnt.Event.EventStreamId.StartsWith("customer-", StringComparison.Ordinal))
+            {
+                return;
+            }
+
             var eventType = evnt.Event.EventType;
+            _logger.LogInformation("Event received: Type={EventType}, Stream={Stream}, EventNumber={EventNumber}",
+                eventType, evnt.Event.EventStreamId, evnt.Event.EventNumber);
+            
             if (string.IsNullOrWhiteSpace(eventType) || eventType.StartsWith("$", StringComparison.Ordinal))
             {
-                await subscription.Ack(evnt);
+                _logger.LogDebug("Skipping system event: {EventType}", eventType);
                 return;
             }
 
@@ -86,7 +96,7 @@ public class EventStorePersistentSubscriptionWorker : BackgroundService
                 var evt = JsonSerializer.Deserialize<CustomerCreatedEvent>(json);
                 if (evt is null)
                 {
-                    await subscription.Nack(PersistentSubscriptionNakEventAction.Park, "Invalid create payload", evnt);
+                    _logger.LogWarning("Failed to deserialize CustomerCreatedV1 event");
                     return;
                 }
 
@@ -99,7 +109,7 @@ public class EventStorePersistentSubscriptionWorker : BackgroundService
                 var evt = JsonSerializer.Deserialize<CustomerUpdatedEvent>(json);
                 if (evt is null)
                 {
-                    await subscription.Nack(PersistentSubscriptionNakEventAction.Park, "Invalid update payload", evnt);
+                    _logger.LogWarning("Failed to deserialize CustomerUpdatedV1 event");
                     return;
                 }
 
@@ -112,7 +122,7 @@ public class EventStorePersistentSubscriptionWorker : BackgroundService
                 var evt = JsonSerializer.Deserialize<CustomerDeletedEvent>(json);
                 if (evt is null)
                 {
-                    await subscription.Nack(PersistentSubscriptionNakEventAction.Park, "Invalid delete payload", evnt);
+                    _logger.LogWarning("Failed to deserialize CustomerDeletedV1 event");
                     return;
                 }
 
@@ -122,7 +132,6 @@ public class EventStorePersistentSubscriptionWorker : BackgroundService
             else
             {
                 _logger.LogInformation("Unknown event type {EventType}. Ack and skip.", eventType);
-                await subscription.Ack(evnt);
                 return;
             }
 
@@ -132,7 +141,7 @@ public class EventStorePersistentSubscriptionWorker : BackgroundService
             var alreadyProcessed = await db.ProcessedEvents.AnyAsync(x => x.EventId == eventId, cancellationToken);
             if (alreadyProcessed)
             {
-                await subscription.Ack(evnt);
+                _logger.LogDebug("Event already processed: EventId={EventId}", eventId);
                 return;
             }
 
@@ -142,6 +151,7 @@ public class EventStorePersistentSubscriptionWorker : BackgroundService
                 if (existing is not null)
                 {
                     existing.IsDeleted = true;
+                    _logger.LogInformation("Marked customer as deleted: AggregateId={AggregateId}", aggregateId);
                 }
             }
             else if (existing is null)
@@ -152,11 +162,13 @@ public class EventStorePersistentSubscriptionWorker : BackgroundService
                     Name = data?.Name ?? string.Empty,
                     IsDeleted = false
                 });
+                _logger.LogInformation("Created new customer: AggregateId={AggregateId}, Name={Name}", aggregateId, data?.Name);
             }
             else
             {
                 existing.Name = data?.Name ?? string.Empty;
                 existing.IsDeleted = false;
+                _logger.LogInformation("Updated customer: AggregateId={AggregateId}, Name={Name}", aggregateId, data?.Name);
             }
 
             db.ProcessedEvents.Add(new ProcessedEvent
@@ -166,19 +178,15 @@ public class EventStorePersistentSubscriptionWorker : BackgroundService
             });
 
             await db.SaveChangesAsync(cancellationToken);
-            await subscription.Ack(evnt);
+            _logger.LogInformation("Successfully processed event: EventId={EventId}, AggregateId={AggregateId}", eventId, aggregateId);
         }
         catch (DbUpdateException ex) when (IsDuplicateKey(ex))
         {
-            await subscription.Ack(evnt);
+            _logger.LogInformation("Duplicate key exception, still acknowledging event to move forward");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to process event. RetryCount={RetryCount}", retryCount ?? 0);
-            var action = (retryCount ?? 0) >= 5
-                ? PersistentSubscriptionNakEventAction.Park
-                : PersistentSubscriptionNakEventAction.Retry;
-            await subscription.Nack(action, ex.Message, evnt);
+            _logger.LogError(ex, "Failed to process event from stream {Stream}", evnt.Event.EventStreamId);
         }
     }
 

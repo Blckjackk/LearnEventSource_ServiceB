@@ -19,7 +19,7 @@ builder.Services.AddSingleton(sp =>
 {
     var conn = builder.Configuration["EventStore:ConnectionString"]
                ?? "esdb://admin:changeit@localhost:2113?tls=false";
-    return new EventStorePersistentSubscriptionsClient(EventStoreClientSettings.Create(conn));
+    return new EventStoreClient(EventStoreClientSettings.Create(conn));
 });
 builder.Services.AddHostedService<EventStorePersistentSubscriptionWorker>();
 
