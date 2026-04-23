@@ -1,6 +1,7 @@
 using CustomerProjectionService.Messaging;
 using CustomerProjectionService.Data;
 using Microsoft.EntityFrameworkCore;
+using EventStore.Client;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -13,6 +14,14 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(
         builder.Configuration.GetConnectionString("DefaultConnection"),
         sqlOptions => sqlOptions.EnableRetryOnFailure()));
+
+builder.Services.AddSingleton(sp =>
+{
+    var conn = builder.Configuration["EventStore:ConnectionString"]
+               ?? "esdb://admin:changeit@localhost:2113?tls=false";
+    return new EventStorePersistentSubscriptionsClient(EventStoreClientSettings.Create(conn));
+});
+builder.Services.AddHostedService<EventStorePersistentSubscriptionWorker>();
 
 var app = builder.Build();
 
@@ -27,10 +36,6 @@ if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
-
-// START CONSUMER (RABBIT RABBIT)
-var consumer = new RabbitMqConsumer(app.Services); // ketika Service yang enih dijalanin, dia tuh kaya subscribe ke yang dia subs, sambil nunggu info terbaru gitu
-consumer.Start();
 
 app.UseHttpsRedirection();
 
