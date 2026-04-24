@@ -12,10 +12,12 @@ public class AppDbContext : DbContext
 
     public DbSet<Customer> Customers { get; set; }
     public DbSet<ProcessedEvent> ProcessedEvents { get; set; }
+    public DbSet<ProjectionCheckpoint> ProjectionCheckpoints { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<ProcessedEvent>().HasKey(x => x.EventId);
+        modelBuilder.Entity<ProjectionCheckpoint>().HasKey(x => x.Id);
         base.OnModelCreating(modelBuilder);
     }
 }

@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore;
 namespace CustomerProjectionService.Controllers;
 
 [ApiController]
-[Route("api/projection/customers")]
+[Route("api/customer")]
 public class CustomerProjectionController : ControllerBase
 {
     private readonly AppDbContext _db;

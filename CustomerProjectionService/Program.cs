@@ -28,7 +28,17 @@ var app = builder.Build();
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    db.Database.Migrate();
+    var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>()
+        .CreateLogger("Startup");
+
+    try
+    {
+        db.Database.Migrate();
+    }
+    catch (Exception ex)
+    {
+        logger.LogWarning(ex, "Database migrate at startup failed. Service will keep running and worker will retry when DB is available.");
+    }
 }
 
 // Configure the HTTP request pipeline.
